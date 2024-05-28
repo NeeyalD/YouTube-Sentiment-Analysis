@@ -1,0 +1,140 @@
+!pip install google-api-python-client oauth2client vaderSentiment transformers matplotlib wordcloud flask
+
+import os
+import csv
+from googleapiclient.discovery import build
+from google.oauth2 import service_account
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from transformers import pipeline, RobertaTokenizer
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
+from urllib.parse import urlparse, parse_qs
+
+# Google API credentials
+credentials = service_account.Credentials.from_service_account_file('/content/lisa-420710-b825ec3155d8.json')
+youtube = build('youtube', 'v3', credentials=credentials)
+
+# VADER Sentiment Analyzer
+vader_analyzer = SentimentIntensityAnalyzer()
+
+# RoBERTa Sentiment Analyzer
+roberta_analyzer = pipeline("sentiment-analysis")
+tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+
+def get_video_id(link):
+    # Parse the URL and extract the video ID
+    parsed_url = urlparse(link)
+    query_params = parse_qs(parsed_url.query)
+    if 'v' in query_params:
+        return query_params['v'][0]
+    else:
+        return None
+
+def get_comments(video_id):
+    comments = []
+    next_page_token = None
+    while True:
+        request = youtube.commentThreads().list(
+            part="snippet",
+            videoId=video_id,
+            textFormat="plainText",
+            maxResults=10000,  # Maximum comments per page
+            order="relevance",
+            pageToken=next_page_token
+        )
+        response = request.execute()
+        for item in response['items']:
+            comment = item['snippet']['topLevelComment']['snippet']['textOriginal']
+            likes = item['snippet']['topLevelComment']['snippet']['likeCount']
+            # Truncate comment to maximum length of 512 characters
+            truncated_comment = comment[:512]
+            comments.append((truncated_comment, likes))
+        if 'nextPageToken' in response:
+            next_page_token = response['nextPageToken']
+        else:
+            break
+    return comments
+
+def categorize_sentiment(score):
+    if score >= 0.8:
+        return 'Very Positive'
+    elif 0.6 <= score < 0.8:
+        return 'Positive'
+    elif 0.2 <= score < 0.6:
+        return 'Neutral'
+    elif -0.2 <= score < 0.2:
+        return 'Negative'
+    elif score < -0.2:
+        return 'Very Negative'
+
+
+def analyze_sentiment(comment):
+    vader_score = vader_analyzer.polarity_scores(comment)['compound']
+    roberta_score = roberta_analyzer(comment)[0]['score']
+    if vader_score != 0:
+        sentiment_score = vader_score  # Keep VADER score as it is
+    else:
+        sentiment_score = roberta_score  # Keep RoBERTa score as it is
+    sentiment_category = categorize_sentiment(sentiment_score)
+    return sentiment_category, sentiment_score
+
+def analyze_sentiment_value(comment):
+    _, sentiment_value = analyze_sentiment(comment)
+    return sentiment_value
+
+def generate_pie_chart(sentiments):
+    labels = list(sentiments.keys())
+    sizes = list(sentiments.values())
+    plt.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140)
+    plt.axis('equal')
+    plt.show()
+
+def generate_wordcloud(comments):
+    text = ' '.join(comments)
+    if text:
+        wordcloud = WordCloud(width=800, height=400, background_color ='white').generate(text)
+        plt.figure(figsize=(10, 8), facecolor=None)
+        plt.imshow(wordcloud)
+        plt.axis("off")
+        plt.tight_layout(pad=0)
+        plt.show()
+    else:
+        print("No comments found to generate word cloud.")
+
+def save_results_to_csv(video_link, comments, sentiments, sentiment_values, likes):
+    with open('sentiment_analysis_results.csv', mode='w', newline='', encoding='utf-8') as file:
+        writer = csv.writer(file)
+        writer.writerow(['Comment', 'Sentiment', 'Sentiment Value', 'Likes'])
+        for comment, sentiment, sentiment_value, like_count in zip(comments, sentiments, sentiment_values, likes):
+            writer.writerow([comment, sentiment, sentiment_value, like_count])
+    print(f"Sentiment analysis results saved to 'sentiment_analysis_results.csv' for video: {video_link}")
+
+def main(video_link):
+    video_id = get_video_id(video_link)
+    if video_id:
+        comments = get_comments(video_id)
+        if comments:
+            relevant_comments = [(comment, likes) for comment, likes in comments if likes > 0]
+            if relevant_comments:
+                comment_texts = [comment for comment, _ in relevant_comments]
+                comment_likes = [likes for _, likes in relevant_comments]
+                sentiments = []
+                sentiment_values = []
+                for comment_text in comment_texts:
+                    sentiment, sentiment_value = analyze_sentiment(comment_text)
+                    sentiments.append(sentiment)
+                    sentiment_values.append(sentiment_value)
+                save_results_to_csv(video_link, comment_texts, sentiments, sentiment_values, comment_likes)
+                sentiments_count = {sentiment: sentiments.count(sentiment) for sentiment in set(sentiments)}
+                generate_pie_chart(sentiments_count)
+                generate_wordcloud(comment_texts)
+            else:
+                print("No relevant comments with positive sentiment found for this video.")
+        else:
+            print("No comments found for this video.")
+    else:
+        print("Invalid YouTube video link. Please provide a valid link.")
+
+if __name__ == "__main__":
+    video_link = input("Enter the YouTube video link: ")
+    main(video_link)
